@@ -52,8 +52,37 @@ class BitwardenLoginBackend(LoginBackend):
             env["BW_SESSION"] = session_token
         return env
 
+    def _session_token(self) -> Optional[str]:
+        """In-memory token, else one minted out-of-process.
+
+        A messaging-gateway session (Telegram/Discord/…) has no surface that can
+        prompt for the master password, so the only way `browser_vault` can reach
+        this backend there is an unlock that happened somewhere else: a wrapper
+        script keeping ``<hermes home>/.bw_session`` fresh, or ``BW_SESSION`` in
+        the process environment. Override the file with
+        ``vault.bitwarden.session_file``. Falls back to the old behaviour (locked)
+        whenever nothing usable is present.
+        """
+        token = _unlock.get_session_token(self.name)
+        if token:
+            return token
+        env = (os.environ.get("BW_SESSION") or "").strip()
+        if env:
+            return env
+        path = str(self.cfg.get("session_file") or "").strip()
+        if not path:
+            try:
+                from hermes_constants import get_hermes_home
+                path = str(get_hermes_home() / ".bw_session")
+            except Exception:
+                return None
+        try:
+            return Path(path).read_text(encoding="utf-8").strip() or None
+        except Exception:
+            return None
+
     def is_unlocked(self) -> bool:
-        return _unlock.is_unlocked(self.name)
+        return bool(self._session_token())
 
     def unlock(self, master_password: str) -> None:
         # bw refuses a piped password ("Master password is required"); its non-interactive contract is
@@ -72,7 +101,7 @@ class BitwardenLoginBackend(LoginBackend):
             raise RuntimeError("Bitwarden was locked while unlocking; try again")
 
     def _run(self, *args: str) -> str:
-        token = _unlock.get_session_token(self.name)
+        token = self._session_token()
         if not token:
             raise UnlockRequired(self)
         proc = run_cli([str(self._bw()), *args, "--nointeraction"], env=self._env(token), timeout=_TIMEOUT,
